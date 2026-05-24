@@ -21,6 +21,26 @@ In `focusprofit-features`:
 - **`alert_enable`** (MCP tool) and **`alert_disable`** (MCP tool) — activate/deactivate one or more existing TradingView alerts by id via `POST /restart_alerts` and `POST /stop_alerts` on `pricealerts.tradingview.com`. Mirrors the `alert_list` pattern.
 - Corresponding CLI subcommands `tv alert enable --ids 1,2,3` and `tv alert disable --ids 1,2,3`.
 
+## Адаптивная precision цен в data_get_pine_labels / pine_boxes / pine_lines
+
+Цены, возвращаемые инструментами `data_get_pine_labels`,
+`data_get_pine_boxes` и `data_get_pine_lines`, округляются адаптивно по
+абсолютному значению:
+
+| Диапазон значения | Знаков после запятой | Примеры инструментов |
+|---|---|---|
+| >= 100 | 2 | BTCUSDT, GER40, XAUUSD |
+| < 100 | 5 | EURUSD, GBPUSD, мелкие токены |
+
+Реализация: `src/core/data.js`, функция `priceDecimals`.
+
+Known limitation: JPY-пары (USDJPY ~150, GBPJPY ~190 и т.п.) попадают в
+диапазон >= 100 и получают 2 знака вместо нужных 3-5. Точное решение
+через `chart.symbolExt().minmov` остаётся в качестве followup — upstream
+MCP API не возвращает mintick через `quote_get` или `symbol_info`, и
+расширение требует отдельной задачи с runtime-проверкой формата
+`symbolExt()` на разных классах инструментов.
+
 ## Sync with upstream
 
 The fork uses `upstream` remote pointing at `tradesdontlie/tradingview-mcp`:
