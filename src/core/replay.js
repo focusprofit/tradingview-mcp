@@ -16,6 +16,34 @@ function _resolve(deps) {
   };
 }
 
+// The "Continue your last replay?" dialog (`[data-name="warning-dialog"]`) pops up when entering
+// replay while a saved session exists. It overlays the chart and BLOCKS data_get_pine_* reads
+// (study_count:0) until dismissed — the dominant cause of slow/flaky regression runs (TM-260).
+// "Start new" discards the stale saved replay (so selectDate() controls the date and the prompt
+// does not recur); "Continue" would jump to the saved position (wrong date). Default: discard.
+function dismissDialogJS(label) {
+  return `(function(){
+    var dlg = document.querySelector('[data-name="warning-dialog"]');
+    if (!dlg || dlg.offsetParent === null) return { present: false, dismissed: false };
+    if (!/last replay/i.test(dlg.textContent || '')) return { present: false, dismissed: false };
+    var btns = dlg.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if ((btns[i].textContent || '').trim() === ${JSON.stringify(label)}) { btns[i].click(); return { present: true, dismissed: true }; }
+    }
+    return { present: true, dismissed: false };
+  })()`;
+}
+
+export async function dismissReplayDialog({ label = 'Start new', tries = 6, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  for (let i = 0; i < tries; i++) {
+    const r = await evaluate(dismissDialogJS(label)).catch(() => null);
+    if (r && r.dismissed) { await new Promise(res => setTimeout(res, 150)); return true; }
+    await new Promise(res => setTimeout(res, 120));
+  }
+  return false;
+}
+
 export async function start({ date, _deps } = {}) {
   const { evaluate, getReplayApi } = _resolve(_deps);
   const rp = await getReplayApi();
@@ -23,6 +51,10 @@ export async function start({ date, _deps } = {}) {
   if (!available) throw new Error('Replay is not available for the current symbol/timeframe');
 
   await evaluate(`${rp}.showReplayToolbar()`);
+
+  // Discard the "Continue your last replay?" prompt up front so it neither blocks the chart
+  // nor overrides selectDate() with the saved position (TM-260).
+  await dismissReplayDialog({ label: 'Start new', _deps });
 
   // selectDate() is async — it calls enableReplayMode() then _onPointSelected()
   // which initializes the server-side replay session. Must be awaited inside the
@@ -42,6 +74,8 @@ export async function start({ date, _deps } = {}) {
   let started = false;
   let currentDate = null;
   for (let i = 0; i < 30; i++) {
+    // The prompt can re-appear during init — keep it dismissed so the chart stays interactable.
+    await evaluate(dismissDialogJS('Start new')).catch(() => {});
     started = await evaluate(wv(`${rp}.isReplayStarted()`));
     currentDate = await evaluate(wv(`${rp}.currentDate()`));
     if (started && currentDate !== null) break;
@@ -100,6 +134,9 @@ export async function stop({ _deps } = {}) {
     return { success: true, action: 'already_stopped' };
   }
   await evaluate(`${rp}.stopReplay()`);
+  // Defensive: clear any lingering "Continue your last replay?" prompt so the next data read
+  // is not blocked (TM-260).
+  await dismissReplayDialog({ label: 'Start new', _deps });
   return { success: true, action: 'replay_stopped' };
 }
 
