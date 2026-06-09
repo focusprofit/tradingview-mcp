@@ -50,6 +50,16 @@ export async function start({ date, _deps } = {}) {
   const available = await evaluate(wv(`${rp}.isReplayAvailable()`));
   if (!available) throw new Error('Replay is not available for the current symbol/timeframe');
 
+  // selectDate() is a no-op on an already-active replay session — without stopping first,
+  // replay_start(newDate) silently keeps the previous/saved position (TM-260). Stop, then
+  // discard the "Continue your last replay?" prompt so selectDate() below controls the date.
+  const alreadyStarted = await evaluate(wv(`${rp}.isReplayStarted()`));
+  if (alreadyStarted) {
+    try { await evaluate(`${rp}.stopReplay()`); } catch {}
+    await dismissReplayDialog({ label: 'Start new', _deps });
+    await new Promise(r => setTimeout(r, 250));
+  }
+
   await evaluate(`${rp}.showReplayToolbar()`);
 
   // Discard the "Continue your last replay?" prompt up front so it neither blocks the chart
