@@ -242,3 +242,82 @@ export async function symbolSearch({ query, type }) {
 
   return { success: true, query, source: 'rest_api', results, count: results.length };
 }
+
+// TM-261 §4 (and TM-124 diagnosis): force-load older history up to a target
+// date. setVisibleRange/scrollToDate only zoom within ALREADY loaded bars —
+// they never request more data, which is why labels anchored in deep history
+// stay unresolved (graphics sentinel) and §4.x regression scenarios could not
+// reach their episodes. This loop repeatedly exposes the left edge (official
+// chartApi.setVisibleRange when available, zoomToBarsRange overshoot as
+// fallback) and waits for the series to actually extend; it stops and reports
+// honestly when the feed/subscription refuses to serve older bars.
+export async function loadHistory({ to_date, max_rounds = 12, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
+  let target;
+  if (/^\d+$/.test(String(to_date))) target = Number(to_date);
+  else target = Math.floor(new Date(to_date).getTime() / 1000);
+  if (isNaN(target)) throw new Error(`Could not parse to_date: ${to_date}. Use ISO format (2025-11-01) or unix seconds.`);
+
+  const firstTimeJS = `
+    (function() {
+      var bars = ${CHART_API}._chartWidget.model().mainSeries().bars();
+      var fi = bars.firstIndex();
+      if (fi == null) return null;
+      var v = bars.valueAt(fi);
+      return v ? v[0] : null;
+    })()
+  `;
+
+  let firstTime = await evaluate(firstTimeJS);
+  if (firstTime == null) throw new Error('Main series has no bars — chart not ready.');
+  const initialFirst = firstTime;
+  let rounds = 0;
+
+  while (firstTime > target && rounds < max_rounds) {
+    rounds++;
+    const mode = await evaluate(`
+      (function() {
+        var c = ${CHART_API};
+        if (typeof c.setVisibleRange === 'function') {
+          try { c.setVisibleRange({ from: ${target}, to: ${firstTime} }); return 'api'; } catch (e) {}
+        }
+        var m = c._chartWidget.model();
+        var bars = m.mainSeries().bars();
+        var fi = bars.firstIndex();
+        // Overshoot left of the loaded range — exposing space before the first
+        // bar is what makes the chart engine request older data.
+        m.timeScale().zoomToBarsRange(fi - 300, fi + 60);
+        return 'zoom';
+      })()
+    `);
+
+    // Wait for the series to actually extend (or conclude it will not).
+    let extended = false;
+    for (let i = 0; i < 16; i++) {
+      await new Promise(r => setTimeout(r, 400));
+      const nowFirst = await evaluate(firstTimeJS);
+      if (nowFirst != null && nowFirst < firstTime) { firstTime = nowFirst; extended = true; break; }
+    }
+    if (!extended) {
+      return {
+        success: true,
+        complete: false,
+        reason: `history did not extend past ${new Date(firstTime * 1000).toISOString()} (feed/subscription limit?)`,
+        requested: new Date(target * 1000).toISOString(),
+        earliest_loaded: new Date(firstTime * 1000).toISOString(),
+        initial_earliest: new Date(initialFirst * 1000).toISOString(),
+        rounds_used: rounds,
+        last_mode: mode,
+      };
+    }
+  }
+
+  return {
+    success: true,
+    complete: firstTime <= target,
+    requested: new Date(target * 1000).toISOString(),
+    earliest_loaded: new Date(firstTime * 1000).toISOString(),
+    initial_earliest: new Date(initialFirst * 1000).toISOString(),
+    rounds_used: rounds,
+  };
+}

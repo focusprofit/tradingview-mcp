@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
+import { waitChartReadyDetailed } from '../wait.js';
 
 export function registerChartTools(server) {
   server.tool('chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', {}, async () => {
@@ -56,6 +57,24 @@ export function registerChartTools(server) {
     date: z.string().describe('ISO date string (e.g., "2024-01-15") or unix timestamp as a string'),
   }, async ({ date }) => {
     try { return jsonResult(await core.scrollToDate({ date })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('chart_load_history', 'Force-load older history up to a target date (scroll/zoom only navigate ALREADY loaded bars — this actually requests more data). Needed before reading labels/episodes anchored in deep history; reports honestly when the feed refuses to extend.', {
+    to_date: z.string().describe('Load history back to this date (ISO, e.g. "2025-11-01", or unix seconds)'),
+    max_rounds: z.coerce.number().optional().describe('Max load rounds before giving up (default 12)'),
+  }, async ({ to_date, max_rounds }) => {
+    try { return jsonResult(await core.loadHistory({ to_date, max_rounds })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('chart_wait_ready', 'Wait until the chart is actually ready (no blocking dialog, series has bars and is stable, optional symbol/timeframe/study match) instead of sleeping blindly. Use after symbol/timeframe/replay changes when the next step depends on fresh data.', {
+    expected_symbol: z.string().optional().describe('Expect chart symbol to contain this substring (e.g. "EURUSD")'),
+    expected_tf: z.string().optional().describe('Expect this resolution (e.g. "240", "D")'),
+    expect_study: z.string().optional().describe('Expect a study whose name contains this substring to expose graphics (e.g. "Trade Model")'),
+    timeout_ms: z.coerce.number().optional().describe('Max wait in ms (default 10000)'),
+  }, async ({ expected_symbol, expected_tf, expect_study, timeout_ms }) => {
+    try { return jsonResult({ success: true, ...(await waitChartReadyDetailed({ expected_symbol, expected_tf, expect_study, timeout_ms })) }); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
