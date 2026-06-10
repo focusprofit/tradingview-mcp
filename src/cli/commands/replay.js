@@ -15,6 +15,17 @@ register('replay', {
       description: 'Advance one bar in replay',
       handler: () => core.step(),
     }],
+    ['trace', {
+      description: 'Advance N bars, dumping labels/tables to a JSONL file after every step',
+      options: {
+        steps: { type: 'string', short: 'n', description: 'Number of steps (default 1, max 500)' },
+        filter: { type: 'string', short: 'f', description: 'Study name substring for dumps' },
+        tables: { type: 'boolean', description: 'Also dump Pine tables (debug table)' },
+        text: { type: 'string', short: 't', description: 'Only labels containing this text' },
+        file: { type: 'string', description: 'Trace file path (JSONL, default auto under dumps/)' },
+      },
+      handler: (opts) => core.stepAndDump({ steps: opts.steps ? Number(opts.steps) : 1, study_filter: opts.filter, include_tables: opts.tables, labels_text_filter: opts.text, dump_file: opts.file }),
+    }],
     ['stop', {
       description: 'Stop replay and return to realtime',
       handler: () => core.stop(),

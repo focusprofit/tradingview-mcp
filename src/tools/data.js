@@ -50,17 +50,24 @@ export function registerDataTools(server) {
   server.tool('data_get_pine_lines', 'Read horizontal price levels drawn by Pine Script indicators (line.new). Returns deduplicated price levels per study. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name (e.g., "Profiler", "NY Levels"). Omit for all.'),
     verbose: z.coerce.boolean().optional().describe('Return raw line data with IDs, coordinates, colors (default false — returns only unique price levels)'),
-  }, async ({ study_filter, verbose }) => {
-    try { return jsonResult(await core.getPineLines({ study_filter, verbose })); }
+    from: z.string().optional().describe('Only lines inside the window: start date (YYYY-MM-DD or unix seconds)'),
+    to: z.string().optional().describe('Only lines inside the window: end date (YYYY-MM-DD or unix seconds)'),
+    dump_to_file: z.string().optional().describe('Write the full line list to a JSON file (path, or "true" for an auto-named file under <repo>/dumps) and return only a summary'),
+  }, async ({ study_filter, verbose, from, to, dump_to_file }) => {
+    try { return jsonResult(await core.getPineLines({ study_filter, verbose, from, to, dump_to_file })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_pine_labels', 'Read text labels drawn by Pine Script indicators (label.new). Returns text and price pairs. Use study_filter to target a specific indicator.', {
+  server.tool('data_get_pine_labels', 'Read text labels drawn by Pine Script indicators (label.new). Returns text, price and bar time per label, sorted chronologically; labels anchored outside the loaded history are flagged unresolved. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
     max_labels: z.coerce.number().optional().describe('Max labels per study (default 50). Set higher if you need all.'),
-    verbose: z.coerce.boolean().optional().describe('Return raw label data with IDs, colors, positions (default false — returns only text + price)'),
-  }, async ({ study_filter, max_labels, verbose }) => {
-    try { return jsonResult(await core.getPineLabels({ study_filter, max_labels, verbose })); }
+    verbose: z.coerce.boolean().optional().describe('Return raw label data with IDs, colors, positions, unix time and bar index (default false — returns text + price + time)'),
+    from: z.string().optional().describe('Only labels at/after this date (YYYY-MM-DD or unix seconds); unresolved anchors are excluded and counted'),
+    to: z.string().optional().describe('Only labels at/before this date (YYYY-MM-DD or unix seconds)'),
+    text_filter: z.string().optional().describe('Only labels whose text contains this substring (case-insensitive), e.g. "HL"'),
+    dump_to_file: z.string().optional().describe('Write the full label list to a JSON file (path, or "true" for an auto-named file under <repo>/dumps) and return only a summary'),
+  }, async ({ study_filter, max_labels, verbose, from, to, text_filter, dump_to_file }) => {
+    try { return jsonResult(await core.getPineLabels({ study_filter, max_labels, verbose, from, to, text_filter, dump_to_file })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -73,9 +80,12 @@ export function registerDataTools(server) {
 
   server.tool('data_get_pine_boxes', 'Read box/zone boundaries drawn by Pine Script indicators (box.new). Returns deduplicated {high, low} price zones. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
-    verbose: z.coerce.boolean().optional().describe('Return all boxes with IDs and coordinates (default false — returns unique price zones)'),
-  }, async ({ study_filter, verbose }) => {
-    try { return jsonResult(await core.getPineBoxes({ study_filter, verbose })); }
+    verbose: z.coerce.boolean().optional().describe('Return all boxes with IDs, coordinates and bar times (default false — returns unique price zones)'),
+    from: z.string().optional().describe('Only boxes inside the window: start date (YYYY-MM-DD or unix seconds)'),
+    to: z.string().optional().describe('Only boxes inside the window: end date (YYYY-MM-DD or unix seconds)'),
+    dump_to_file: z.string().optional().describe('Write the full box list to a JSON file (path, or "true" for an auto-named file under <repo>/dumps) and return only a summary'),
+  }, async ({ study_filter, verbose, from, to, dump_to_file }) => {
+    try { return jsonResult(await core.getPineBoxes({ study_filter, verbose, from, to, dump_to_file })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

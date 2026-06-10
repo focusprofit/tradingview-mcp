@@ -2,6 +2,42 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { writeFileSync, mkdirSync } from 'fs';
+import { join, dirname, isAbsolute } from 'path';
+import { fileURLToPath } from 'url';
+
+// Dump directory for full-payload JSON dumps (TM-261): <repo>/dumps.
+// Keeping large dumps on disk instead of streaming them through the agent
+// context is the point — debugging works against the file.
+const __dirnameData = dirname(fileURLToPath(import.meta.url));
+export const DUMP_DIR = join(dirname(dirname(__dirnameData)), 'dumps');
+
+export function resolveDumpPath(requested, prefix, ext) {
+  if (typeof requested === 'string' && requested && requested !== 'true') {
+    return isAbsolute(requested) ? requested : join(DUMP_DIR, requested);
+  }
+  return join(DUMP_DIR, `${prefix}_${Date.now()}${ext}`);
+}
+
+export function writeDump(path, payload) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(payload, null, 1));
+  return path;
+}
+
+// Unix seconds → compact UTC string for dumps ("2026-01-27 20:00").
+function isoMinute(unixSec) {
+  return new Date(unixSec * 1000).toISOString().slice(0, 16).replace('T', ' ');
+}
+
+// "YYYY-MM-DD", ISO datetime or unix-seconds string → unix seconds.
+function parseTimeParam(value, name) {
+  if (value === undefined || value === null || value === '') return null;
+  if (/^\d+$/.test(String(value))) return Number(value);
+  const ts = Math.floor(new Date(value).getTime() / 1000);
+  if (isNaN(ts)) throw new Error(`Could not parse ${name}: "${value}". Use YYYY-MM-DD or unix seconds.`);
+  return ts;
+}
 
 /**
  * Adaptive price rounding precision based on absolute value.
@@ -31,6 +67,7 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
+      var tscale = model.timeScale();
       var sources = model.model().dataSources();
       var results = [];
       var filter = ${safeString(filter || '')};
@@ -44,7 +81,24 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
           if (filter && name.indexOf(filter) === -1) continue;
           var g = s._graphics;
           if (!g || !g._primitivesCollection) continue;
-          var pc = g._primitivesCollection;
+          // Primitive x fields are positions in the study graphics timepoint
+          // array (g._indexes), NOT bar indexes. Each entry holds the
+          // timescale bar index, or a large-negative sentinel when the anchor
+          // bar is outside the currently loaded history (such primitives are
+          // not even rendered) — report those as unresolved (TM-261).
+          var idxArr = g._indexes || null;
+          var rtp = function(xi) {
+            if (xi === undefined || xi === null || !idxArr) return null;
+            var tp = idxArr[xi];
+            if (tp === undefined || tp === null || tp <= -1000000) return null;
+            var out = { bar: tp, time: null };
+            try {
+              var ut = tscale.indexToUserTime(tp);
+              if (ut) out.time = Math.round(ut.getTime() / 1000);
+            } catch (e) {}
+            return out;
+          };
+          var pc = s._graphics._primitivesCollection;
           var items = [];
           try {
             var outer = pc.${collectionName};
@@ -53,7 +107,9 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
               if (inner) {
                 var coll = inner.get(false);
                 if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {
-                  coll._primitivesDataById.forEach(function(v, id) { items.push({id: id, raw: v}); });
+                  coll._primitivesDataById.forEach(function(v, id) {
+                    items.push({id: id, raw: v, tp0: rtp(v.x !== undefined ? v.x : v.x1), tp1: rtp(v.x2)});
+                  });
                 }
               }
             }
@@ -375,49 +431,111 @@ export async function getStudyValues() {
   return { success: true, study_count: data?.length || 0, studies: data || [] };
 }
 
-export async function getPineLines({ study_filter, verbose } = {}) {
+export async function getPineLines({ study_filter, verbose, from, to, dump_to_file } = {}) {
   const filter = study_filter || '';
+  const fromTs = parseTimeParam(from, 'from');
+  const toTs = parseTimeParam(to, 'to');
   const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
   if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
 
+  const wantItems = verbose || dump_to_file;
   const studies = raw.map(s => {
     const hLevels = [];
     const seen = {};
     const allLines = [];
-    for (const item of s.items) {
+    let excludedUnresolved = 0;
+    const items = s.items.slice().sort((a, b) => ((a.raw.x1 ?? a.raw.x ?? 0) - (b.raw.x1 ?? b.raw.x ?? 0)));
+    for (const item of items) {
       const v = item.raw;
+      const t1 = item.tp0 ? item.tp0.time : null;
+      const t2 = item.tp1 ? item.tp1.time : null;
+      if (fromTs != null || toTs != null) {
+        const anchor = t2 != null ? t2 : t1; // line end (or start) inside the window
+        if (anchor == null) { excludedUnresolved++; continue; }
+        if (fromTs != null && anchor < fromTs) continue;
+        if (toTs != null && (t1 != null ? t1 : anchor) > toTs) continue;
+      }
       const y1 = v.y1 != null ? Number(v.y1.toFixed(priceDecimals(v.y1))) : null;
       const y2 = v.y2 != null ? Number(v.y2.toFixed(priceDecimals(v.y2))) : null;
-      if (verbose) allLines.push({ id: item.id, y1, y2, x1: v.x1, x2: v.x2, horizontal: v.y1 === v.y2, style: v.st, width: v.w, color: v.ci });
+      if (wantItems) {
+        const rec = { id: item.id, y1, y2, time1: t1 != null ? isoMinute(t1) : null, time2: t2 != null ? isoMinute(t2) : null, x1: v.x1, x2: v.x2, horizontal: v.y1 === v.y2, style: v.st, width: v.w, color: v.ci };
+        if (!item.tp0 && !item.tp1) rec.unresolved = true;
+        allLines.push(rec);
+      }
       if (y1 != null && v.y1 === v.y2 && !seen[y1]) { hLevels.push(y1); seen[y1] = true; }
     }
     hLevels.sort((a, b) => b - a);
     const result = { name: s.name, total_lines: s.count, horizontal_levels: hLevels };
-    if (verbose) result.all_lines = allLines;
+    if (excludedUnresolved) result.excluded_unresolved = excludedUnresolved;
+    if (wantItems) result.all_lines = allLines;
     return result;
   });
+
+  if (dump_to_file) {
+    const path = resolveDumpPath(dump_to_file, 'pine_lines', '.json');
+    writeDump(path, { generated_at: new Date().toISOString(), study_filter: filter || null, from, to, studies });
+    return { success: true, study_count: studies.length, dumped_to: path, studies: studies.map(s => ({ name: s.name, total_lines: s.total_lines, written: s.all_lines.length })) };
+  }
   return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
+export async function getPineLabels({ study_filter, max_labels, verbose, from, to, text_filter, dump_to_file } = {}) {
   const filter = study_filter || '';
+  const fromTs = parseTimeParam(from, 'from');
+  const toTs = parseTimeParam(to, 'to');
+  const textNeedle = text_filter ? String(text_filter).toLowerCase() : null;
   const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
   if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
 
   const limit = max_labels || 50;
   const studies = raw.map(s => {
+    let excludedUnresolved = 0;
     let labels = s.items.map(item => {
       const v = item.raw;
       const text = v.t || '';
       const price = v.y != null
         ? Number(v.y.toFixed(priceDecimals(v.y)))
         : null;
-      if (verbose) return { id: item.id, text, price, x: v.x, yloc: v.yl, size: v.sz, textColor: v.tci, color: v.ci };
-      return { text, price };
+      const tp = item.tp0;
+      const base = { text, price, time: tp && tp.time != null ? isoMinute(tp.time) : null };
+      if (!tp) base.unresolved = true;
+      if (verbose) Object.assign(base, { id: item.id, time_unix: tp ? tp.time : null, bar: tp ? tp.bar : null, x: v.x, yloc: v.yl, size: v.sz, textColor: v.tci, color: v.ci });
+      base._x = v.x; // chronological sort key (timepoint order), stripped below
+      base._t = tp ? tp.time : null;
+      return base;
     }).filter(l => l.text || l.price != null);
-    if (labels.length > limit) labels = labels.slice(-limit);
-    return { name: s.name, total_labels: s.count, showing: labels.length, labels };
+
+    // x is the position in the study's timepoint array → chronological order.
+    labels.sort((a, b) => (a._x ?? 0) - (b._x ?? 0));
+
+    if (textNeedle) labels = labels.filter(l => (l.text || '').toLowerCase().includes(textNeedle));
+    if (fromTs != null || toTs != null) {
+      labels = labels.filter(l => {
+        if (l._t == null) { excludedUnresolved++; return false; }
+        if (fromTs != null && l._t < fromTs) return false;
+        if (toTs != null && l._t > toTs) return false;
+        return true;
+      });
+    }
+    const matched = labels.length;
+    if (!dump_to_file && labels.length > limit) labels = labels.slice(-limit);
+    for (const l of labels) { delete l._x; delete l._t; }
+
+    const out = { name: s.name, total_labels: s.count, matched, showing: labels.length, labels };
+    if (excludedUnresolved) out.excluded_unresolved = excludedUnresolved;
+    return out;
   });
+
+  if (dump_to_file) {
+    const path = resolveDumpPath(dump_to_file, 'pine_labels', '.json');
+    writeDump(path, { generated_at: new Date().toISOString(), study_filter: filter || null, from, to, text_filter, studies });
+    return {
+      success: true,
+      study_count: studies.length,
+      dumped_to: path,
+      studies: studies.map(s => ({ name: s.name, total_labels: s.total_labels, matched: s.matched, excluded_unresolved: s.excluded_unresolved })),
+    };
+  }
   return { success: true, study_count: studies.length, studies };
 }
 
@@ -449,28 +567,52 @@ export async function getPineTables({ study_filter } = {}) {
   return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineBoxes({ study_filter, verbose } = {}) {
+export async function getPineBoxes({ study_filter, verbose, from, to, dump_to_file } = {}) {
   const filter = study_filter || '';
+  const fromTs = parseTimeParam(from, 'from');
+  const toTs = parseTimeParam(to, 'to');
   const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
   if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
 
+  const wantItems = verbose || dump_to_file;
   const studies = raw.map(s => {
     const zones = [];
     const seen = {};
     const allBoxes = [];
-    for (const item of s.items) {
+    let excludedUnresolved = 0;
+    const items = s.items.slice().sort((a, b) => ((a.raw.x1 ?? 0) - (b.raw.x1 ?? 0)));
+    for (const item of items) {
       const v = item.raw;
+      const t1 = item.tp0 ? item.tp0.time : null;
+      const t2 = item.tp1 ? item.tp1.time : null;
+      if (fromTs != null || toTs != null) {
+        const anchor = t2 != null ? t2 : t1;
+        if (anchor == null) { excludedUnresolved++; continue; }
+        if (fromTs != null && anchor < fromTs) continue;
+        if (toTs != null && (t1 != null ? t1 : anchor) > toTs) continue;
+      }
       const hi = v.y1 != null && v.y2 != null ? Math.max(v.y1, v.y2) : null;
       const lo = v.y1 != null && v.y2 != null ? Math.min(v.y1, v.y2) : null;
       const high = hi != null ? Number(hi.toFixed(priceDecimals(hi))) : null;
       const low  = lo != null ? Number(lo.toFixed(priceDecimals(lo))) : null;
-      if (verbose) allBoxes.push({ id: item.id, high, low, x1: v.x1, x2: v.x2, borderColor: v.c, bgColor: v.bc });
+      if (wantItems) {
+        const rec = { id: item.id, high, low, time1: t1 != null ? isoMinute(t1) : null, time2: t2 != null ? isoMinute(t2) : null, x1: v.x1, x2: v.x2, borderColor: v.c, bgColor: v.bc };
+        if (!item.tp0 && !item.tp1) rec.unresolved = true;
+        allBoxes.push(rec);
+      }
       if (high != null && low != null) { const key = high + ':' + low; if (!seen[key]) { zones.push({ high, low }); seen[key] = true; } }
     }
     zones.sort((a, b) => b.high - a.high);
     const result = { name: s.name, total_boxes: s.count, zones };
-    if (verbose) result.all_boxes = allBoxes;
+    if (excludedUnresolved) result.excluded_unresolved = excludedUnresolved;
+    if (wantItems) result.all_boxes = allBoxes;
     return result;
   });
+
+  if (dump_to_file) {
+    const path = resolveDumpPath(dump_to_file, 'pine_boxes', '.json');
+    writeDump(path, { generated_at: new Date().toISOString(), study_filter: filter || null, from, to, studies });
+    return { success: true, study_count: studies.length, dumped_to: path, studies: studies.map(s => ({ name: s.name, total_boxes: s.total_boxes, written: s.all_boxes.length })) };
+  }
   return { success: true, study_count: studies.length, studies };
 }

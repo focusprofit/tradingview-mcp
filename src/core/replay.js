@@ -187,3 +187,49 @@ export async function status({ _deps } = {}) {
   const pnl = await evaluate(wv(`${rp}.realizedPL()`));
   return { success: true, ...st, position: pos, realized_pnl: pnl };
 }
+
+// TM-261: one call = N replay steps with an automatic state dump after each
+// step (labels with resolved time, optionally Pine tables — e.g. a debug
+// table). Records are appended as JSONL to a file under <repo>/dumps so long
+// traces never flow through the agent context. Replaces the
+// step→labels→tables call chain per bar that made traces painfully slow.
+export async function stepAndDump({ steps = 1, study_filter, include_tables = false, dump_file, max_labels = 40, labels_text_filter, _deps } = {}) {
+  const { evaluate, getReplayApi } = _resolve(_deps);
+  const { getPineLabels, getPineTables, resolveDumpPath } = await import('./data.js');
+  const { appendFileSync, mkdirSync } = await import('fs');
+  const { dirname } = await import('path');
+
+  const n = Math.min(Math.max(1, Number(steps) || 1), 500);
+  const rp = await getReplayApi();
+  const started = await evaluate(wv(`${rp}.isReplayStarted()`));
+  if (!started) throw new Error('Replay is not started. Use replay_start first.');
+
+  const path = resolveDumpPath(dump_file, 'replay_trace', '.jsonl');
+  mkdirSync(dirname(path), { recursive: true });
+
+  let last = null;
+  let stepsDone = 0;
+  let prevDate = await evaluate(wv(`${rp}.currentDate()`));
+  let stalled = false;
+
+  for (let i = 0; i < n; i++) {
+    const st = await step({ _deps });
+    if (st.current_date === prevDate) { stalled = true; break; } // end of data / replay stopped advancing
+    prevDate = st.current_date;
+
+    const rec = { step: i + 1, replay_date: st.current_date };
+    try {
+      const labels = await getPineLabels({ study_filter, max_labels, text_filter: labels_text_filter });
+      rec.labels = labels.studies;
+    } catch (e) { rec.labels_error = e.message; }
+    if (include_tables) {
+      try { rec.tables = (await getPineTables({ study_filter })).studies; }
+      catch (e) { rec.tables_error = e.message; }
+    }
+    appendFileSync(path, JSON.stringify(rec) + '\n');
+    last = rec;
+    stepsDone++;
+  }
+
+  return { success: true, steps_requested: n, steps_done: stepsDone, stalled, dump_file: path, last };
+}

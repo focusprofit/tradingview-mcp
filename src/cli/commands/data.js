@@ -35,13 +35,17 @@ register('data', {
       handler: (opts) => core.getPineLines({ study_filter: opts.filter, verbose: opts.verbose }),
     }],
     ['labels', {
-      description: 'Get Pine Script label.new() annotations',
+      description: 'Get Pine Script label.new() annotations (with bar time)',
       options: {
         filter: { type: 'string', short: 'f', description: 'Filter by study name substring' },
         max: { type: 'string', short: 'n', description: 'Max labels per study (default 50)' },
         verbose: { type: 'boolean', short: 'v', description: 'Include raw label data' },
+        from: { type: 'string', description: 'Only labels at/after date (YYYY-MM-DD or unix)' },
+        to: { type: 'string', description: 'Only labels at/before date (YYYY-MM-DD or unix)' },
+        text: { type: 'string', short: 't', description: 'Only labels containing this text' },
+        dump: { type: 'string', description: 'Dump full list to JSON file (path or "true")' },
       },
-      handler: (opts) => core.getPineLabels({ study_filter: opts.filter, max_labels: opts.max ? Number(opts.max) : undefined, verbose: opts.verbose }),
+      handler: (opts) => core.getPineLabels({ study_filter: opts.filter, max_labels: opts.max ? Number(opts.max) : undefined, verbose: opts.verbose, from: opts.from, to: opts.to, text_filter: opts.text, dump_to_file: opts.dump }),
     }],
     ['tables', {
       description: 'Get Pine Script table.new() data',

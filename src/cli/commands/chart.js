@@ -71,6 +71,31 @@ register('scroll', {
   },
 });
 
+register('load-history', {
+  description: 'Force-load older history up to a date',
+  options: {
+    rounds: { type: 'string', description: 'Max load rounds (default 12)' },
+  },
+  handler: (opts, positionals) => {
+    if (!positionals[0]) throw new Error('Date required. Usage: tv load-history 2025-11-01');
+    return core.loadHistory({ to_date: positionals[0], max_rounds: opts.rounds ? Number(opts.rounds) : undefined });
+  },
+});
+
+register('wait-ready', {
+  description: 'Wait until the chart is ready (bars stable, no dialog, optional study check)',
+  options: {
+    symbol: { type: 'string', short: 's', description: 'Expected symbol substring' },
+    tf: { type: 'string', description: 'Expected resolution' },
+    study: { type: 'string', description: 'Expected study name substring with graphics' },
+    timeout: { type: 'string', description: 'Timeout ms (default 10000)' },
+  },
+  handler: async (opts) => {
+    const { waitChartReadyDetailed } = await import('../../wait.js');
+    return waitChartReadyDetailed({ expected_symbol: opts.symbol, expected_tf: opts.tf, expect_study: opts.study, timeout_ms: opts.timeout ? Number(opts.timeout) : undefined });
+  },
+});
+
 register('discover', {
   description: 'Report which TradingView API paths are available',
   handler: () => healthCore.discover(),
