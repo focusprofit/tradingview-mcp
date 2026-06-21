@@ -7,6 +7,14 @@ function _resolve(deps) {
   return { evaluate: deps?.evaluate || _evaluate, getChartApi: deps?.getChartApi || _getChartApi };
 }
 
+// Module-level aliases so the non-injected helpers below (listDrawings/
+// getProperties/removeOne/clearAll) resolve the bare names. Without these the
+// aliased imports (_evaluate/_getChartApi) leave `evaluate`/`getChartApi`
+// undefined in those functions → ReferenceError "getChartApi is not defined".
+// drawShape keeps its own block-scoped binding via _resolve(), shadowing these.
+const evaluate = _evaluate;
+const getChartApi = _getChartApi;
+
 export async function drawShape({ shape, point, point2, overrides: overridesRaw, text, _deps }) {
   const { evaluate, getChartApi } = _resolve(_deps);
   const overrides = overridesRaw ? (typeof overridesRaw === 'string' ? JSON.parse(overridesRaw) : overridesRaw) : {};
