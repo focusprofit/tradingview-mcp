@@ -34,30 +34,33 @@ function sha256(s) {
 const READ_BOUND_TITLE = `(function(){ var t=document.querySelector('.label-k49p41Es'); return t?t.textContent.trim():null; })()`;
 
 // ── Monaco finder (injected into TV page) ──
+// querySelectorAll + iterate — first element may lack React fiber (TV renders 2 pine-editor-monaco divs)
 const FIND_MONACO = `
   (function findMonacoEditor() {
-    var container = document.querySelector('.monaco-editor.pine-editor-monaco');
-    if (!container) return null;
-    var el = container;
-    var fiberKey;
-    for (var i = 0; i < 20; i++) {
-      if (!el) break;
-      fiberKey = Object.keys(el).find(function(k) { return k.startsWith('__reactFiber$'); });
-      if (fiberKey) break;
-      el = el.parentElement;
-    }
-    if (!fiberKey) return null;
-    var current = el[fiberKey];
-    for (var d = 0; d < 15; d++) {
-      if (!current) break;
-      if (current.memoizedProps && current.memoizedProps.value && current.memoizedProps.value.monacoEnv) {
-        var env = current.memoizedProps.value.monacoEnv;
-        if (env.editor && typeof env.editor.getEditors === 'function') {
-          var editors = env.editor.getEditors();
-          if (editors.length > 0) return { editor: editors[0], env: env };
-        }
+    var containers = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
+    for (var ci = 0; ci < containers.length; ci++) {
+      var container = containers[ci];
+      var el = container;
+      var fiberKey;
+      for (var i = 0; i < 20; i++) {
+        if (!el) break;
+        fiberKey = Object.keys(el).find(function(k) { return k.startsWith('__reactFiber$'); });
+        if (fiberKey) break;
+        el = el.parentElement;
       }
-      current = current.return;
+      if (!fiberKey) continue;
+      var current = el[fiberKey];
+      for (var d = 0; d < 15; d++) {
+        if (!current) break;
+        if (current.memoizedProps && current.memoizedProps.value && current.memoizedProps.value.monacoEnv) {
+          var env = current.memoizedProps.value.monacoEnv;
+          if (env.editor && typeof env.editor.getEditors === 'function') {
+            var editors = env.editor.getEditors();
+            if (editors.length > 0) return { editor: editors[0], env: env };
+          }
+        }
+        current = current.return;
+      }
     }
     return null;
   })()
