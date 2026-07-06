@@ -63,6 +63,28 @@ const FIND_MONACO = `
   })()
 `;
 
+// Replaces the whole editor buffer via Monaco's edit-pipeline instead of setValue()
+// (TM-324). setValue() resets the model's undo stack and alternative-version-id
+// baseline — TradingView's own unsaved-changes ("dirty") tracking appears to compare
+// against that baseline, so a setValue() injection never registers as a change: a
+// later chart removeEntity + "Add to chart" (or even a Save click) pulls back the
+// STALE server-saved script instead of what is actually sitting in the editor.
+// executeEdits() applies the replacement as a single edit operation through the same
+// pipeline a real keystroke goes through — the model's version id keeps incrementing
+// normally and the undo stack stays contiguous, so whatever onDidChangeModelContent
+// consumer TradingView's React layer uses for dirty-tracking should fire the same way
+// it does for a manual edit. `editorExpr` is the in-page expression for the Monaco
+// editor instance (e.g. `m.editor`); `textExpr` is the in-page expression for the new
+// text (a JSON-stringified literal, or a variable already holding the string).
+function setValueViaEdit(editorExpr, textExpr) {
+  return `
+      var __model = ${editorExpr}.getModel();
+      if (!__model) return false;
+      ${editorExpr}.executeEdits('tv-mcp-inject', [{ range: __model.getFullModelRange(), text: ${textExpr}, forceMoveMarkers: true }]);
+      ${editorExpr}.pushUndoStop();
+  `;
+}
+
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
  * Returns true if editor is accessible, false on timeout.
@@ -303,7 +325,7 @@ export async function setSource({ source, reason }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      ${setValueViaEdit('m.editor', escaped)}
       return true;
     })()
   `);
@@ -317,7 +339,8 @@ export async function setSource({ source, reason }) {
 
 // Inject a local file's exact bytes into the editor and verify byte-exactly (TM-233).
 // The server reads the file itself (no model transcription of the source), sets it
-// via Monaco setValue, reads it back, and compares SHA-256(file) vs SHA-256(editor).
+// via Monaco's edit-pipeline (executeEdits, see setValueViaEdit / TM-324), reads it
+// back, and compares SHA-256(file) vs SHA-256(editor).
 // `verified` is the cryptographic guarantee that the editor holds exactly the file.
 // Use this for large / unicode-heavy files (e.g. index.pine) where re-emitting the
 // source as a string argument is unreliable. Like setSource it never targets PROD —
@@ -337,7 +360,7 @@ export async function setSourceFromFile({ path, reason }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      ${setValueViaEdit('m.editor', escaped)}
       return true;
     })()
   `);
@@ -633,7 +656,7 @@ export async function newScript({ type }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      ${setValueViaEdit('m.editor', escaped)}
       return true;
     })()
   `);
@@ -680,7 +703,7 @@ export async function openScript({ name }) {
               if (!source) return {error: 'Script source is empty', name: match.scriptName || match.scriptTitle};
               var m = ${FIND_MONACO};
               if (m) {
-                m.editor.setValue(source);
+                ${setValueViaEdit('m.editor', 'source')}
                 return {success: true, name: match.scriptName || match.scriptTitle, id: id, lines: source.split('\\n').length};
               }
               return {error: 'Monaco editor not found to inject source', name: match.scriptName || match.scriptTitle};
