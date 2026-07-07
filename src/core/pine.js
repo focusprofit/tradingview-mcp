@@ -34,37 +34,78 @@ function sha256(s) {
 const READ_BOUND_TITLE = `(function(){ var t=document.querySelector('.label-k49p41Es'); return t?t.textContent.trim():null; })()`;
 
 // ── Monaco finder (injected into TV page) ──
-// querySelectorAll + iterate — first element may lack React fiber (TV renders 2 pine-editor-monaco divs)
+// getEditors() returns EVERY Monaco editor instance ever created on the page, in
+// creation order — TradingView keeps prior script tabs' editors alive (hidden, not
+// disposed) when you switch scripts, so instances accumulate across a session.
+// Picking [0] (oldest) silently targets a stale/hidden editor once a second script
+// has ever been opened — reads and writes then succeed (self-consistent verify)
+// against the WRONG buffer while the visible tab is untouched (TM-332, found live
+// 07.07 debugging an "AAPLAAPL" DEV corruption: getEditors() had 2 entries, [0] was
+// a stale hidden smoke-test scratch buffer, [1] was the real visible DEV editor).
+// Select the editor whose DOM node is actually visible instead; only fall back to
+// [0] if visibility can't be determined (defensive, should not happen).
 const FIND_MONACO = `
   (function findMonacoEditor() {
     var containers = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
-    for (var ci = 0; ci < containers.length; ci++) {
-      var container = containers[ci];
-      var el = container;
-      var fiberKey;
-      for (var i = 0; i < 20; i++) {
-        if (!el) break;
-        fiberKey = Object.keys(el).find(function(k) { return k.startsWith('__reactFiber$'); });
-        if (fiberKey) break;
-        el = el.parentElement;
-      }
-      if (!fiberKey) continue;
-      var current = el[fiberKey];
-      for (var d = 0; d < 15; d++) {
-        if (!current) break;
-        if (current.memoizedProps && current.memoizedProps.value && current.memoizedProps.value.monacoEnv) {
-          var env = current.memoizedProps.value.monacoEnv;
-          if (env.editor && typeof env.editor.getEditors === 'function') {
-            var editors = env.editor.getEditors();
-            if (editors.length > 0) return { editor: editors[0], env: env };
+    var container = null;
+    for (var c = 0; c < containers.length; c++) {
+      if (containers[c].offsetParent !== null) { container = containers[c]; break; }
+    }
+    if (!container) container = containers[0];
+    if (!container) return null;
+    var el = container;
+    var fiberKey;
+    for (var i = 0; i < 20; i++) {
+      if (!el) break;
+      fiberKey = Object.keys(el).find(function(k) { return k.startsWith('__reactFiber$'); });
+      if (fiberKey) break;
+      el = el.parentElement;
+    }
+    if (!fiberKey) return null;
+    var current = el[fiberKey];
+    for (var d = 0; d < 15; d++) {
+      if (!current) break;
+      if (current.memoizedProps && current.memoizedProps.value && current.memoizedProps.value.monacoEnv) {
+        var env = current.memoizedProps.value.monacoEnv;
+        if (env.editor && typeof env.editor.getEditors === 'function') {
+          var editors = env.editor.getEditors();
+          if (editors.length > 0) {
+            var visible = null;
+            for (var j = 0; j < editors.length; j++) {
+              var dom = editors[j].getDomNode ? editors[j].getDomNode() : null;
+              if (dom && dom.offsetParent !== null) { visible = editors[j]; break; }
+            }
+            return { editor: visible || editors[0], env: env };
           }
         }
-        current = current.return;
       }
+      current = current.return;
     }
     return null;
   })()
 `;
+
+// Replaces the whole editor buffer via Monaco's edit-pipeline instead of setValue()
+// (TM-324). setValue() resets the model's undo stack and alternative-version-id
+// baseline — TradingView's own unsaved-changes ("dirty") tracking appears to compare
+// against that baseline, so a setValue() injection never registers as a change: a
+// later chart removeEntity + "Add to chart" (or even a Save click) pulls back the
+// STALE server-saved script instead of what is actually sitting in the editor.
+// executeEdits() applies the replacement as a single edit operation through the same
+// pipeline a real keystroke goes through — the model's version id keeps incrementing
+// normally and the undo stack stays contiguous, so whatever onDidChangeModelContent
+// consumer TradingView's React layer uses for dirty-tracking should fire the same way
+// it does for a manual edit. `editorExpr` is the in-page expression for the Monaco
+// editor instance (e.g. `m.editor`); `textExpr` is the in-page expression for the new
+// text (a JSON-stringified literal, or a variable already holding the string).
+function setValueViaEdit(editorExpr, textExpr) {
+  return `
+      var __model = ${editorExpr}.getModel();
+      if (!__model) return false;
+      ${editorExpr}.executeEdits('tv-mcp-inject', [{ range: __model.getFullModelRange(), text: ${textExpr}, forceMoveMarkers: true }]);
+      ${editorExpr}.pushUndoStop();
+  `;
+}
 
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
@@ -306,7 +347,7 @@ export async function setSource({ source, reason }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      ${setValueViaEdit('m.editor', escaped)}
       return true;
     })()
   `);
@@ -320,7 +361,8 @@ export async function setSource({ source, reason }) {
 
 // Inject a local file's exact bytes into the editor and verify byte-exactly (TM-233).
 // The server reads the file itself (no model transcription of the source), sets it
-// via Monaco setValue, reads it back, and compares SHA-256(file) vs SHA-256(editor).
+// via Monaco's edit-pipeline (executeEdits, see setValueViaEdit / TM-324), reads it
+// back, and compares SHA-256(file) vs SHA-256(editor).
 // `verified` is the cryptographic guarantee that the editor holds exactly the file.
 // Use this for large / unicode-heavy files (e.g. index.pine) where re-emitting the
 // source as a string argument is unreliable. Like setSource it never targets PROD —
@@ -340,7 +382,7 @@ export async function setSourceFromFile({ path, reason }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      ${setValueViaEdit('m.editor', escaped)}
       return true;
     })()
   `);
@@ -358,12 +400,20 @@ export async function setSourceFromFile({ path, reason }) {
     throw new Error('Monaco getValue() returned null after setSourceFromFile.');
   }
   const editorSha = sha256(editorContent);
-  const verified = fileSha === editorSha;
+  // Monaco normalizes line endings to the model's configured EOL (observed: \r\n)
+  // regardless of how the text was injected, so a raw byte compare against an
+  // LF-only source file false-negatives on every inject (TM-332 item 4). The
+  // project's manual protocol already normalizes CRLF->LF before comparing
+  // (see trademodel CLAUDE.md); do the same normalization here so `verified`
+  // reflects actual content equality, not incidental line-ending drift.
+  const normalizeEOL = (s) => s.replace(/\r\n/g, '\n');
+  const verifiedRaw = fileSha === editorSha;
+  const verified = normalizeEOL(fileContent) === normalizeEOL(editorContent);
 
   logPineAction({
     action: 'set_source_from_file', target: boundTitle, path,
     bytes: Buffer.byteLength(fileContent, 'utf8'), lines: fileContent.split('\n').length,
-    sha256: fileSha, verified, reason: reason || null,
+    sha256: fileSha, verified, verified_raw: verifiedRaw, reason: reason || null,
   });
 
   return {
@@ -375,6 +425,7 @@ export async function setSourceFromFile({ path, reason }) {
     sha256: fileSha,
     sha256_editor: editorSha,
     verified,
+    verified_raw: verifiedRaw,
   };
 }
 
@@ -549,10 +600,23 @@ export async function smartCompile() {
           btns[i].click();
           return 'Save and add to chart';
         }
-        if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
-        if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];
+        // TM-332 item 1: this button's textContent duplicates the label (observed
+        // "Add to chartAdd to chart" — visible + accessibility span both counted),
+        // so an exact ^...$ match silently missed it and fell through to plain Save,
+        // meaning a private/invite-only script bound in the editor was never actually
+        // added to the chart. Prefix match (like compile()'s regex below) tolerates
+        // the duplication either way.
+        if (!addBtn && /^add to chart/i.test(text)) addBtn = btns[i];
+        if (!updateBtn && /^update on chart/i.test(text)) updateBtn = btns[i];
         if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
       }
+      // TM-332 live-verify (07.07): confirmed live that the icon-only variant of this
+      // button carries no title/aria-label at all (label only renders in a hover
+      // tooltip) — the earlier title-attribute fallback never matched anything.
+      // The stable identifier in both variants (icon-only and textual) is the
+      // data-qa-id TradingView itself uses for its own test automation, so query by
+      // that directly instead of guessing at label text/attributes.
+      if (!addBtn) addBtn = document.querySelector('button[data-qa-id="add-script-to-chart"]');
       if (addBtn) { addBtn.click(); return 'Add to chart'; }
       if (updateBtn) { updateBtn.click(); return 'Update on chart'; }
       if (saveBtn) { saveBtn.click(); return 'Pine Save'; }
@@ -566,7 +630,28 @@ export async function smartCompile() {
     await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
   }
 
-  await new Promise(r => setTimeout(r, 2500));
+  // TM-332: clicking "Add to chart" on a script with unsaved changes pops a
+  // confirmation dialog ("Save this script before adding?") that otherwise
+  // blocks the add silently (study_added stays false with no error) until a
+  // human clicks its own Save button — same shape as the "Save Script" name
+  // dialog save() already handles below, different trigger.
+  await new Promise(r => setTimeout(r, 400));
+  const dialogHandled = await evaluate(`
+    (function() {
+      var btns = document.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        var text = btns[i].textContent.trim();
+        if (text === 'Save' && btns[i].offsetParent !== null) {
+          var parent = btns[i].closest('[class*="dialog"], [class*="modal"], [class*="popup"], [role="dialog"]');
+          if (parent) { btns[i].click(); return true; }
+        }
+      }
+      return false;
+    })()
+  `);
+  if (dialogHandled) await new Promise(r => setTimeout(r, 500));
+
+  await new Promise(r => setTimeout(r, 2100));
 
   const errors = await evaluate(`
     (function() {
@@ -596,6 +681,7 @@ export async function smartCompile() {
   return {
     success: true,
     button_clicked: buttonClicked || 'keyboard_shortcut',
+    dialog_handled: dialogHandled,
     has_errors: errors?.length > 0,
     errors: errors || [],
     study_added: studyAdded,
@@ -621,7 +707,7 @@ export async function newScript({ type }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      ${setValueViaEdit('m.editor', escaped)}
       return true;
     })()
   `);
@@ -668,7 +754,7 @@ export async function openScript({ name }) {
               if (!source) return {error: 'Script source is empty', name: match.scriptName || match.scriptTitle};
               var m = ${FIND_MONACO};
               if (m) {
-                m.editor.setValue(source);
+                ${setValueViaEdit('m.editor', 'source')}
                 return {success: true, name: match.scriptName || match.scriptTitle, id: id, lines: source.split('\\n').length};
               }
               return {error: 'Monaco editor not found to inject source', name: match.scriptName || match.scriptTitle};
@@ -757,6 +843,18 @@ export async function openScriptGui({ name, reason }) {
   if (!verified) {
     throw new Error('Binding verification FAILED: editor title is "' + toTitle + '", expected "' + displayName + '". Switch did not take effect — do NOT save or publish.');
   }
+
+  // Step 5 — best-effort close of the leftover "Open my script" panel (TM-332 item 7).
+  // Clicking the target row switches the binding but does not auto-dismiss this panel
+  // on current TradingView UI; Escape does not close it either. Not fatal if the
+  // button isn't found (panel may have already closed on its own) — caller still gets
+  // a verified switch either way.
+  await evaluate(`(function(){
+    var btns = [].slice.call(document.querySelectorAll('button'));
+    var closeBtn = btns.find(function(b){ return /close menu/i.test((b.textContent||'').trim()); });
+    if (closeBtn) closeBtn.click();
+  })()`);
+  await new Promise(r => setTimeout(r, 200));
 
   return { success: true, name: displayName, script_id: scriptId, bound_title: toTitle, from: fromTitle, verified: true, method: 'gui_open' };
 }

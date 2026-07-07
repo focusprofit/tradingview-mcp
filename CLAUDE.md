@@ -2,6 +2,40 @@
 
 68 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
 
+## Hard Rule — A Missing/Broken Tool Blocks the Debug Task, Full Stop
+
+If live debugging or verification work (in `trademodel` or any other consumer) turns up
+a gap in this MCP server — a tool that's missing, broken, silently wrong (e.g. a regex
+that matches the wrong button, a "verified" flag that's a false negative, a stale-study
+repaint that never fires), or a UI flow with no reliable driver — **stop the debugging
+task immediately.** Do not improvise around the gap. Specifically, do not:
+
+- call TradingView's internal/undocumented API directly (`window.TradingViewApi`, raw
+  chart-model/Monaco internals) via `ui_evaluate` as a substitute for a proper tool,
+- repeat blind UI-coordinate or ambiguous-class clicking hoping it lands on the right
+  element,
+- accept a partial/uncertain result and quietly route around it.
+
+Instead:
+
+1. File or update a `TM` ticket in Jira (the `trademodel` project) describing the gap
+   precisely — what was tried, what failed, and why it isn't a proper fix.
+2. Fix the tool in **this** repository (`tradingview-mcp`) — direct commit, no
+   `/run`-orchestrator (this repo is outside `/run`'s scope; see the TM-324/TM-332
+   precedent for the workflow: implement, commit, describe the fix in the same TM
+   ticket).
+3. Only **then** return to the original debugging task, using the fixed tool.
+
+**Why:** several incidents happened in one night (2026-07-06/07, the TM-328..332 arc)
+from skipping this discipline under time pressure — a raw `model.removeSource()` call
+removed a user's live indicator from their chart, an ambiguous
+`ui_click(by="class-contains")` hit the wrong button ("Unflag symbol" instead of a
+settings gear), and a manual DOM `.click()` attempt was (correctly) blocked by the
+safety classifier. Every one of these was an attempt to route *around* a real tooling
+gap instead of stopping to fix it. This rule binds **every** agent working with this
+MCP server — the main/orchestrating agent included, no exception for "just this once"
+or session time pressure.
+
 ## Decision Tree — Which Tool When
 
 ### "What's on my chart right now?"
