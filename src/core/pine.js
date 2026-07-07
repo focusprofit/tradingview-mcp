@@ -555,8 +555,14 @@ export async function smartCompile() {
           btns[i].click();
           return 'Save and add to chart';
         }
-        if (!addBtn && /^add to chart$/i.test(text)) addBtn = btns[i];
-        if (!updateBtn && /^update on chart$/i.test(text)) updateBtn = btns[i];
+        // TM-332 item 1: this button's textContent duplicates the label (observed
+        // "Add to chartAdd to chart" — visible + accessibility span both counted),
+        // so an exact ^...$ match silently missed it and fell through to plain Save,
+        // meaning a private/invite-only script bound in the editor was never actually
+        // added to the chart. Prefix match (like compile()'s regex below) tolerates
+        // the duplication either way.
+        if (!addBtn && /^add to chart/i.test(text)) addBtn = btns[i];
+        if (!updateBtn && /^update on chart/i.test(text)) updateBtn = btns[i];
         if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
       }
       if (addBtn) { addBtn.click(); return 'Add to chart'; }
@@ -763,6 +769,18 @@ export async function openScriptGui({ name, reason }) {
   if (!verified) {
     throw new Error('Binding verification FAILED: editor title is "' + toTitle + '", expected "' + displayName + '". Switch did not take effect — do NOT save or publish.');
   }
+
+  // Step 5 — best-effort close of the leftover "Open my script" panel (TM-332 item 7).
+  // Clicking the target row switches the binding but does not auto-dismiss this panel
+  // on current TradingView UI; Escape does not close it either. Not fatal if the
+  // button isn't found (panel may have already closed on its own) — caller still gets
+  // a verified switch either way.
+  await evaluate(`(function(){
+    var btns = [].slice.call(document.querySelectorAll('button'));
+    var closeBtn = btns.find(function(b){ return /close menu/i.test((b.textContent||'').trim()); });
+    if (closeBtn) closeBtn.click();
+  })()`);
+  await new Promise(r => setTimeout(r, 200));
 
   return { success: true, name: displayName, script_id: scriptId, bound_title: toTitle, from: fromTitle, verified: true, method: 'gui_open' };
 }

@@ -44,7 +44,7 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes', {}, async () => {
+  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes. Also the way to add a private/invite-only script to the chart programmatically — clicks the editor\'s own "Add to chart" button, which works for private scripts even though chart_manage_indicator(add) does not.', {}, async () => {
     try { return jsonResult(await core.smartCompile()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
