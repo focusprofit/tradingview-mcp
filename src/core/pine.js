@@ -34,9 +34,24 @@ function sha256(s) {
 const READ_BOUND_TITLE = `(function(){ var t=document.querySelector('.label-k49p41Es'); return t?t.textContent.trim():null; })()`;
 
 // ── Monaco finder (injected into TV page) ──
+// getEditors() returns EVERY Monaco editor instance ever created on the page, in
+// creation order — TradingView keeps prior script tabs' editors alive (hidden, not
+// disposed) when you switch scripts, so instances accumulate across a session.
+// Picking [0] (oldest) silently targets a stale/hidden editor once a second script
+// has ever been opened — reads and writes then succeed (self-consistent verify)
+// against the WRONG buffer while the visible tab is untouched (TM-332, found live
+// 07.07 debugging an "AAPLAAPL" DEV corruption: getEditors() had 2 entries, [0] was
+// a stale hidden smoke-test scratch buffer, [1] was the real visible DEV editor).
+// Select the editor whose DOM node is actually visible instead; only fall back to
+// [0] if visibility can't be determined (defensive, should not happen).
 const FIND_MONACO = `
   (function findMonacoEditor() {
-    var container = document.querySelector('.monaco-editor.pine-editor-monaco');
+    var containers = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
+    var container = null;
+    for (var c = 0; c < containers.length; c++) {
+      if (containers[c].offsetParent !== null) { container = containers[c]; break; }
+    }
+    if (!container) container = containers[0];
     if (!container) return null;
     var el = container;
     var fiberKey;
@@ -54,7 +69,14 @@ const FIND_MONACO = `
         var env = current.memoizedProps.value.monacoEnv;
         if (env.editor && typeof env.editor.getEditors === 'function') {
           var editors = env.editor.getEditors();
-          if (editors.length > 0) return { editor: editors[0], env: env };
+          if (editors.length > 0) {
+            var visible = null;
+            for (var j = 0; j < editors.length; j++) {
+              var dom = editors[j].getDomNode ? editors[j].getDomNode() : null;
+              if (dom && dom.offsetParent !== null) { visible = editors[j]; break; }
+            }
+            return { editor: visible || editors[0], env: env };
+          }
         }
       }
       current = current.return;
