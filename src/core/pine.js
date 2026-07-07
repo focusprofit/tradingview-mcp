@@ -630,7 +630,28 @@ export async function smartCompile() {
     await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
   }
 
-  await new Promise(r => setTimeout(r, 2500));
+  // TM-332: clicking "Add to chart" on a script with unsaved changes pops a
+  // confirmation dialog ("Save this script before adding?") that otherwise
+  // blocks the add silently (study_added stays false with no error) until a
+  // human clicks its own Save button — same shape as the "Save Script" name
+  // dialog save() already handles below, different trigger.
+  await new Promise(r => setTimeout(r, 400));
+  const dialogHandled = await evaluate(`
+    (function() {
+      var btns = document.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        var text = btns[i].textContent.trim();
+        if (text === 'Save' && btns[i].offsetParent !== null) {
+          var parent = btns[i].closest('[class*="dialog"], [class*="modal"], [class*="popup"], [role="dialog"]');
+          if (parent) { btns[i].click(); return true; }
+        }
+      }
+      return false;
+    })()
+  `);
+  if (dialogHandled) await new Promise(r => setTimeout(r, 500));
+
+  await new Promise(r => setTimeout(r, 2100));
 
   const errors = await evaluate(`
     (function() {
@@ -660,6 +681,7 @@ export async function smartCompile() {
   return {
     success: true,
     button_clicked: buttonClicked || 'keyboard_shortcut',
+    dialog_handled: dialogHandled,
     has_errors: errors?.length > 0,
     errors: errors || [],
     study_added: studyAdded,
