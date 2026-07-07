@@ -607,6 +607,15 @@ export async function smartCompile() {
         // added to the chart. Prefix match (like compile()'s regex below) tolerates
         // the duplication either way.
         if (!addBtn && /^add to chart/i.test(text)) addBtn = btns[i];
+        // TM-332 live-verify (07.07): a second, icon-only variant of this same button
+        // was observed (data-qa-id="add-script-to-chart", empty textContent, label only
+        // in the title attribute) — the textContent-based match above misses it
+        // entirely and falls through to plain Save, silently leaving the script off
+        // the chart. Fall back to the title attribute when textContent is empty.
+        if (!addBtn && !text) {
+          var titleAttr = (btns[i].getAttribute('title') || '').trim();
+          if (/^add to chart/i.test(titleAttr)) addBtn = btns[i];
+        }
         if (!updateBtn && /^update on chart/i.test(text)) updateBtn = btns[i];
         if (!saveBtn && btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) saveBtn = btns[i];
       }
