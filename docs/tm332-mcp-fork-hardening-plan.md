@@ -173,6 +173,40 @@ stale-study инцидент произойдёт живьём (например
 не изобретать искусственный репро сейчас. Не готов как встроенный tool до этой
 валидации.
 
+**П.3 (TM-324) — НЕ был отдельным пунктом верификации статуса, оказался ГЛАВНОЙ
+находкой п.2.** Проверка статуса (как просил план) вскрыла: ветка `TM-324`
+(commit `82a574c`, 06.07.2026, НЕ смёржена в `main`) содержит уже готовый,
+рассуждением обоснованный, юнит-протестированный (29/29) фикс ИМЕННО
+stale-study/stale-readd симптома — `model.setValue()`/`editor.setValue()`
+сбрасывает undo-стек и alternative-version-id модели Monaco, а TradingView's
+собственный dirty-tracking сверяется именно с этой базой → инжект через
+`setValue()` никогда не регистрируется как реальное изменение → последующий
+remove+re-add или Save подтягивает СТАРУЮ серверную версию скрипта вместо
+того, что реально в редакторе. Коммит сам прямым текстом фиксирует: "Live e2e
+verification... still needed — no live TradingView access in this task's
+context" — ровно то, что было недоступно тогда и есть сейчас.
+**Cherry-pick `82a574c` → `TM-332` сделан** (commit `933a07a`, чистый
+auto-merge, конфликтов не было), заменяет `setValue()` на
+`editor.executeEdits()+pushUndoStop()` (тот же pipeline, что у реальной
+клавиши) во ВСЕХ 4 точках инжекта (`setSource`, `setSourceFromFile`,
+`newScript`, `openScript`). Syntax-checked (`node --check`), юнит-тесты
+перепрогнаны (`node --test tests/e2e.test.js tests/pine_analyze.test.js`):
+99/102 pass, 3 fail — все 3 диагностированы как pre-existing/несвязанные
+(`tv_launch` — TradingView binary не найден в этом контейнере, окружение;
+`ui_open_panel close` — тест зовёт `bottomWidgetBar.hideWidget` без guard'а,
+которого нет на текущей live-версии TV, баг теста, не моего кода, в
+`src/core/ui.js`, я туда не лазил; `replay_stop` — live replay-state
+зависимость). **ТОЖЕ НЕ live-провалидирован после cherry-pick** — тот же
+блокер: нужен рестарт `node src/server.js` для live-verify, чего пока не
+делали.
+
+**Вывод: п.2 (stale-study) — правдоподобно уже РЕШЁН, не просто
+'исследован'** — TM-324's fix целится точно в описанный этой ночью
+механизм; `recalculate()` (найденный отдельно, риск-mitigation-second-layer)
+может быть уже не нужен, если TM-324's fix сам по себе устраняет root cause.
+Приоритет для следующего live-verify: подтвердить ИМЕННО TM-324's fix
+(остановленный stale-readd cycle), не `recalculate()`.
+
 ## §2 Приоритизация (предложение, владелец подтверждает/меняет)
 
 **P0 (проверить в первую очередь, возможно решает МНОГОЕ без единой строки кода):**
