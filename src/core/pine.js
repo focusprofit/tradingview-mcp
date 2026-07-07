@@ -379,7 +379,7 @@ export async function setSourceFromFile({ path, reason }) {
   }
   const editorSha = sha256(editorContent);
   // Monaco normalizes line endings to the model's configured EOL (observed: \r\n)
-  // regardless of what was set via setValue(), so a raw byte compare against an
+  // regardless of how the text was injected, so a raw byte compare against an
   // LF-only source file false-negatives on every inject (TM-332 item 4). The
   // project's manual protocol already normalizes CRLF->LF before comparing
   // (see trademodel CLAUDE.md); do the same normalization here so `verified`
