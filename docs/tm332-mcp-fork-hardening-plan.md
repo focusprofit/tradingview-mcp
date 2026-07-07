@@ -115,6 +115,64 @@ Editor»/«Add to chart» слепым перебором `ui_find_element`/ко
     последний раз реально пересчиталась (если TradingView API это вообще
     экспонирует — требует разведки).
 
+## §1.1 Прогресс сессии 07.07 ~14:40-15:10 (ветка `TM-332`, ждёт server-рестарт для live-verify)
+
+**П.7 — ПОДТВЕРЖДЁН РАБОЧИМ вживую.** `ui_open_panel(panel="pine-editor", action="open")`
+открывает Pine Editor корректно забинженным на текущий скрипт (проверено
+скриншотом + `pine_get_source`). Остаточный модал «Open my script» закрывается
+чисто через `ui_click(by="text", value="Close menu")` (найден однозначно через
+`ui_find_element([class*="close"])`) — без blind-клика, без Escape.
+`openScriptGui` (commit `43141d8`) теперь делает этот close ПОСЛЕ verified-свитча
+сам, best-effort (не бросает, если панель уже закрылась).
+
+**П.1 — РЕШЁН, root cause найден, live-подтверждён.** `smartCompile()` использовал
+`/^add to chart$/i` (точное совпадение) для детекта кнопки «Add to chart», но
+её `textContent` дублирован TradingView'ем самим («Add to chartAdd to chart» —
+видимый лейбл + a11y-span оба попадают в textContent) → regex молча не матчил →
+падало на fallback «Pine Save» (просто Save, БЕЗ добавления на график). Живой
+тест: переключился на `Trade Model TEST (smoke)` (приватный, disposable
+smoke-script, НЕ production DEV), напрямую кликнул найденную кнопку «Add to
+chart» координатами из `ui_find_element` — study РЕАЛЬНО появилась в
+`chart_get_state` (`tmFormat warm test`, entity `LYH3nd`). Убрано сразу после
+теста (`chart_manage_indicator remove`), график вернул чистое состояние.
+**Вывод: `chart_manage_indicator(add)` никогда не был правильным путём для
+приватных скриптов — им и не должен становиться, `pine_smart_compile`
+(после regex-фикса, commit `43141d8`) — штатный путь.** Regex сменён на
+prefix-match (`/^add to chart/i`), как уже было у `compile()`.
+**НЕ live-провалидирован ПОСЛЕ фикса** — сервер MCP (`node src/server.js`, pid
+на момент сессии) не подхватывает код без рестарта, а рестарт роняет
+MCP-соединение без автовосстановления в этой сессии
+(`reference_mcp_server_kill_no_autorespawn`). Живой тест выше подтвердил
+ПРИЧИНУ и что клик по правильной кнопке работает — не то, что сам
+исправленный `pine_smart_compile` теперь кликает её (это лишь логически
+следует из regex-фикса, не re-verified после рестарта).
+
+**П.4 — фикс закоммичен (`8fa2ead`), НЕ live-провалидирован** (та же причина —
+нужен рестарт сервера). `setSourceFromFile` теперь нормализует `\r\n→\n` на
+обеих сторонах перед сравнением SHA-256 для поля `verified` (было — сырой
+byte-compare, false-negative на КАЖДОМ инжекте в этой сессии); `verified_raw`
+добавлен отдельно как старое сырое сравнение, для прозрачности.
+
+**П.2 (stale-study) — ЧАСТИЧНАЯ разведка, БЕЗ фикса.** Read-only интроспекция
+внутреннего PineJS-объекта study (`chart.getStudyById(id).study()`, класс `Ws`,
+294 метода) нашла публичный (не `_`-приватный) метод `recalculate()`:
+```
+recalculate(){const e=this._model.paneForSource(this);
+  this._model.recalculatePane(e,(0,J.sourceChangeEvent)(this.id())),
+  this._model.updateSource(this)}
+```
+Не трогает `clearData`/`stop`/`start` (в отличие от публичного `restart(e)`,
+который делает именно это — куда инвазивнее, ближе к remove+re-add по духу).
+**НЕ вызывался вживую** — нет доступного искусственного stale-repro без
+реальной правки продуктового кода (рискованно инструментировать на production
+DEV ради теста), а сознательно имитировать баг сочтено неоправданным риском
+без необходимости (см. `feedback_verifier_raw_chart_api_removed_indicator_incident`
+— не импровизировать против internal API без веской причины и раскрытия).
+**Рекомендация:** validate `recalculate()` СЛЕДУЮЩИЙ раз, когда реальный
+stale-study инцидент произойдёт живьём (например, при возобновлении TM-331) —
+не изобретать искусственный репро сейчас. Не готов как встроенный tool до этой
+валидации.
+
 ## §2 Приоритизация (предложение, владелец подтверждает/меняет)
 
 **P0 (проверить в первую очередь, возможно решает МНОГОЕ без единой строки кода):**
