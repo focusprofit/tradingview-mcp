@@ -39,6 +39,20 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
       }
       if (!nodes) return { error: 'Study exposes no input properties' };
 
+      // TM-395: colour inputs are stored as CSS strings ("rgba(76,175,80,1)"),
+      // while getInputValues() reports them as packed ABGR integers. Feeding the
+      // integer straight into setValue() produces an invalid property value and
+      // kills the study exactly like the array write did. Convert when the
+      // current value is a colour string and the caller passed a number.
+      function packedToCss(n) {
+        var r = n & 0xFF, g = (n >> 8) & 0xFF, b = (n >> 16) & 0xFF, a = (n >>> 24) & 0xFF;
+        // Round-trip through TradingView's own quantisation: it stores
+        // transparency as an integer percent, so derive alpha back from it.
+        var transp = Math.round(100 * (1 - a / 255));
+        var alpha = (100 - transp) / 100;
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+      }
+
       for (var key in overrides) {
         if (!overrides.hasOwnProperty(key)) continue;
         var node = nodes[key];
@@ -46,8 +60,14 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
           missingKeys.push(key);
           continue;
         }
-        node.setValue(overrides[key]);
-        updatedKeys[key] = overrides[key];
+        var value = overrides[key];
+        var current = typeof node.value === 'function' ? node.value() : undefined;
+        if (typeof value === 'number' && typeof current === 'string' &&
+            (current.indexOf('rgba(') === 0 || current.charAt(0) === '#')) {
+          value = packedToCss(value);
+        }
+        node.setValue(value);
+        updatedKeys[key] = value;
       }
 
       // Never report success for a write that changed nothing: a silent no-op
