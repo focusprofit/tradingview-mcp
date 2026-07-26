@@ -22,6 +22,7 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
       var overrides = ${inputsJson};
       var updatedKeys = {};
       var missingKeys = [];
+      var typeErrors = [];
 
       // TM-395: write each input through its own property node — the same path
       // the Inputs dialog uses. The previous implementation read the whole
@@ -62,9 +63,20 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
         }
         var value = overrides[key];
         var current = typeof node.value === 'function' ? node.value() : undefined;
-        if (typeof value === 'number' && typeof current === 'string' &&
-            (current.indexOf('rgba(') === 0 || current.charAt(0) === '#')) {
+        var isColour = typeof current === 'string' &&
+                       (current.indexOf('rgba(') === 0 || current.charAt(0) === '#');
+        if (typeof value === 'number' && isColour) {
           value = packedToCss(value);
+        }
+        // TM-395: refuse a value whose type cannot belong to this input. Writing a
+        // boolean into a colour input (or a string into a numeric one) stores a
+        // value the script cannot parse and kills the study exactly like the old
+        // array write did - and the caller only finds out when the chart goes red.
+        // Caught the hard way: a mistyped key wrote a boolean into a colour input.
+        if (current !== undefined && typeof value !== typeof current &&
+            !(isColour && typeof value === 'string')) {
+          typeErrors.push(key + ' expects ' + typeof current + ', got ' + typeof overrides[key]);
+          continue;
         }
         node.setValue(value);
         updatedKeys[key] = value;
@@ -72,6 +84,10 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
 
       // Never report success for a write that changed nothing: a silent no-op
       // here used to read as "applied" and cost hours of false diagnosis.
+      if (typeErrors.length) {
+        return { error: 'Refused type-mismatched write (the study would have died): ' +
+                        typeErrors.join('; ') + '. Nothing outside this list was skipped.' };
+      }
       if (Object.keys(updatedKeys).length === 0) {
         return { error: 'No input was written. Unknown keys: ' + missingKeys.join(', ') +
                         '. Use chart_get_state + the study metaInfo to get valid input ids.' };
