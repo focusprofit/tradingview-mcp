@@ -3,7 +3,10 @@ import CDP from 'chrome-remote-interface';
 let client = null;
 let targetInfo = null;
 const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
+// TM-399: configurable so a second TradingView instance can be driven by a second
+// server entry (TV_CDP_PORT=9223) instead of both sessions sharing one chart.
+// Default stays 9222 — an unset variable must not change existing behaviour.
+const CDP_PORT = Number(process.env.TV_CDP_PORT) || 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
 

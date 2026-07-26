@@ -160,7 +160,9 @@ export async function uiState() {
 }
 
 export async function launch({ port, kill_existing } = {}) {
-  const cdpPort = port || 9222;
+  // TM-399: an explicit argument still wins; otherwise fall back to the same
+  // variable the connection uses, so launch and connect target one instance.
+  const cdpPort = port || Number(process.env.TV_CDP_PORT) || 9222;
   const killFirst = kill_existing !== false;
   const platform = process.platform;
 
