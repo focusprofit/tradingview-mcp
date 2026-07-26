@@ -19,22 +19,51 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
       var chart = ${CHART_API};
       var study = chart.getStudyById(${safeString(entity_id)});
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
-      var currentInputs = study.getInputValues();
       var overrides = ${inputsJson};
       var updatedKeys = {};
-      for (var i = 0; i < currentInputs.length; i++) {
-        if (overrides.hasOwnProperty(currentInputs[i].id)) {
-          currentInputs[i].value = overrides[currentInputs[i].id];
-          updatedKeys[currentInputs[i].id] = overrides[currentInputs[i].id];
-        }
+      var missingKeys = [];
+
+      // TM-395: write each input through its own property node — the same path
+      // the Inputs dialog uses. The previous implementation read the whole
+      // getInputValues() array, patched it and wrote it back via
+      // setInputValues(); on large Pine scripts that call kills the study
+      // ("Can't parse pine", inputs collapse to an empty list, unrecoverable).
+      // Proven by experiment: the failure reproduces with an UNCHANGED array
+      // and with system entries filtered out, so it is the array-write itself,
+      // not the payload. Per-input setValue leaves the study healthy.
+      var nodes = null;
+      try {
+        nodes = study.properties().childs().inputs.childs();
+      } catch (e) {
+        return { error: 'Cannot reach input properties: ' + (e && e.message ? e.message : String(e)) };
       }
-      study.setInputValues(currentInputs);
-      return { updated_inputs: updatedKeys };
+      if (!nodes) return { error: 'Study exposes no input properties' };
+
+      for (var key in overrides) {
+        if (!overrides.hasOwnProperty(key)) continue;
+        var node = nodes[key];
+        if (!node || typeof node.setValue !== 'function') {
+          missingKeys.push(key);
+          continue;
+        }
+        node.setValue(overrides[key]);
+        updatedKeys[key] = overrides[key];
+      }
+
+      // Never report success for a write that changed nothing: a silent no-op
+      // here used to read as "applied" and cost hours of false diagnosis.
+      if (Object.keys(updatedKeys).length === 0) {
+        return { error: 'No input was written. Unknown keys: ' + missingKeys.join(', ') +
+                        '. Use chart_get_state + the study metaInfo to get valid input ids.' };
+      }
+      return { updated_inputs: updatedKeys, unknown_keys: missingKeys };
     })()
   `);
 
   if (result && result.error) throw new Error(result.error);
-  return { success: true, entity_id, updated_inputs: result.updated_inputs };
+  const out = { success: true, entity_id, updated_inputs: result.updated_inputs };
+  if (result.unknown_keys && result.unknown_keys.length) out.unknown_keys = result.unknown_keys;
+  return out;
 }
 
 export async function toggleVisibility({ entity_id, visible }) {
